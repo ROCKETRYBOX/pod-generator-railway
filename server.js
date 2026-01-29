@@ -1,7 +1,6 @@
 /**
  * POD Generator – Proof of Delivery PDFs from Excel.
- * Deployment: Railway (recommended, 1000+ orders) | Vercel (small batches, ~50) | Local.
- * Env: PUPPETEER_EXECUTABLE_PATH (Railway/Docker), VERCEL (Vercel), CONCURRENT_PDFS, BROWSER_RESTART_EVERY, PDF_TIMEOUT_MS.
+ * Deploy on Railway (1000+ orders). Env: PUPPETEER_EXECUTABLE_PATH (Dockerfile), CONCURRENT_PDFS, BROWSER_RESTART_EVERY, PDF_TIMEOUT_MS.
  */
 import express from "express";
 import multer from "multer";
@@ -11,29 +10,18 @@ import archiver from "archiver";
 import fs from "fs";
 import path from "path";
 
-const isVercel = process.env.VERCEL === "1";
-const tmpDir = isVercel ? "/tmp" : process.cwd();
-
 const app = express();
-const upload = multer({ dest: path.join(tmpDir, "uploads") });
+const upload = multer({ dest: path.join(process.cwd(), "uploads") });
 
 const MAX_PER_ZIP = 3000;
 const IMAGES_DIR = path.join(process.cwd(), "images");
-// Vercel: 60s request limit → cap orders per request. Set VERCEL_MAX_ORDERS to override.
-const MAX_ORDERS_VERCEL = Number(process.env.VERCEL_MAX_ORDERS) || 50;
-// Concurrency: Local 5 | Railway 1 (set CONCURRENT_PDFS=2 or 3 if more RAM) | Vercel 1
+// Concurrency: Local 5 | Railway 1 (set CONCURRENT_PDFS=2 or 3 if more RAM)
 const isRailwayEnv = !!process.env.PUPPETEER_EXECUTABLE_PATH;
-const CONCURRENT_PDFS = Math.max(
-  1,
-  Number(process.env.CONCURRENT_PDFS) || (isRailwayEnv || isVercel ? 1 : 5)
-);
-const PDF_TIMEOUT_MS = Number(process.env.PDF_TIMEOUT_MS) || (isVercel ? 15000 : 45000);
+const CONCURRENT_PDFS = Math.max(1, Number(process.env.CONCURRENT_PDFS) || (isRailwayEnv ? 1 : 5));
+const PDF_TIMEOUT_MS = Number(process.env.PDF_TIMEOUT_MS) || 45000;
 const MAX_PDF_RETRIES = 2;
-// Restart browser every N PDFs to avoid Chromium degradation (Railway/local: 600, Vercel: 25)
-const BROWSER_RESTART_EVERY = Math.max(
-  500,
-  Number(process.env.BROWSER_RESTART_EVERY) || (isVercel ? 25 : 600)
-);
+// Restart browser every N PDFs to avoid Chromium degradation
+const BROWSER_RESTART_EVERY = Math.max(500, Number(process.env.BROWSER_RESTART_EVERY) || 600);
 
 // ================= UI =================
 app.get("/", (req, res) => {
@@ -58,7 +46,7 @@ button { background:#111827; color:#fff; border:none; cursor:pointer; }
       <input type="file" name="excel" accept=".xlsx" required />
       <button type="submit">Generate POD ZIP</button>
     </form>
-    <p class="note">⚡ Use Railway for 1000+ orders. Auto splits into ZIPs of 3000 PDFs each. On Vercel: max ${MAX_ORDERS_VERCEL} orders (60s limit).</p>
+    <p class="note">⚡ Deploy on Railway for 1000+ orders. Auto splits into ZIPs of 3000 PDFs each.</p>
   </div>
 </body>
 </html>
@@ -102,15 +90,8 @@ app.post("/upload", upload.single("excel"), async (req, res) => {
     if (totalRows === 0) {
       return res.status(400).send("No rows with AWB found in the Excel file.");
     }
-    if (isVercel && totalRows > MAX_ORDERS_VERCEL) {
-      return res
-        .status(400)
-        .send(
-          `On Vercel the maximum is ${MAX_ORDERS_VERCEL} orders per request (you have ${totalRows}). Split your file or set VERCEL_MAX_ORDERS.`
-        );
-    }
 
-    const workDir = path.join(tmpDir, "work");
+    const workDir = path.join(process.cwd(), "work");
     if (fs.existsSync(workDir)) fs.rmSync(workDir, { recursive: true, force: true });
     fs.mkdirSync(workDir);
 
@@ -145,17 +126,9 @@ app.post("/upload", upload.single("excel"), async (req, res) => {
 
     console.log(`Processing ${totalRows} orders with concurrency ${CONCURRENT_PDFS}, browser restart every ${BROWSER_RESTART_EVERY} PDFs...`);
 
-    // Railway/Docker: PUPPETEER_EXECUTABLE_PATH set by Dockerfile. Vercel: use @sparticuz/chromium.
-    let executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-    let pptr = puppeteer;
-    if (isVercel && !executablePath) {
-      const chromium = await import("@sparticuz/chromium").then((m) => m.default);
-      pptr = (await import("puppeteer-core")).default;
-      executablePath = await chromium.executablePath();
-    }
-
+    // Railway/Docker: PUPPETEER_EXECUTABLE_PATH set by Dockerfile
     const launchBrowser = () =>
-      pptr.launch({
+      puppeteer.launch({
         headless: true,
         args: [
           "--no-sandbox",
@@ -163,10 +136,10 @@ app.post("/upload", upload.single("excel"), async (req, res) => {
           "--disable-dev-shm-usage",
           "--disable-gpu",
           "--disable-software-rasterizer",
-          ...(isRailwayEnv || isVercel ? ["--single-process", "--no-zygote"] : []),
+          ...(isRailwayEnv ? ["--single-process", "--no-zygote"] : []),
           "--font-render-hinting=none"
         ],
-        executablePath: executablePath || undefined
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH
       });
 
     const uniqueFolders = [...new Set(tasks.map((t) => t.folder))];
@@ -241,7 +214,7 @@ app.post("/upload", upload.single("excel"), async (req, res) => {
     console.log(`Completed: ${successCount} successful, ${failCount} failed`);
 
     // ===== ZIP ALL =====
-    const finalZipPath = path.join(tmpDir, "POD_ZIPS.zip");
+    const finalZipPath = path.join(process.cwd(), "POD_ZIPS.zip");
 
     await new Promise((resolve, reject) => {
       const output = fs.createWriteStream(finalZipPath);
@@ -449,10 +422,4 @@ hr { border:none; border-top:1px solid #000; }
 }
 
 const PORT = process.env.PORT || 3000;
-if (!isVercel) {
-  app.listen(PORT, () =>
-    console.log(`Server running on port ${PORT} (Railway/local – use Railway for 1000+ orders)`)
-  );
-}
-
-export default app;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
